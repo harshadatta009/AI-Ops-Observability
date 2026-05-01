@@ -1,0 +1,42 @@
+version: "3.8"
+
+services:
+  ai-incident-service:
+    image: ai-incident-service:latest
+    hostname: ai-incident-service
+    environment:
+      PROMETHEUS_URL: "${PROMETHEUS_URL:-http://10.100.0.142:9090}"
+      LOKI_URL: "${LOKI_URL:-http://10.100.0.142:3100}"
+      LOOKBACK_MINUTES: "${LOOKBACK_MINUTES:-60}"
+      MAX_LOG_LINES: "${MAX_LOG_LINES:-200}"
+      MAX_LOG_CHARS: "${MAX_LOG_CHARS:-12000}"
+
+      GROQ_API_KEY: "${GROQ_API_KEY}"
+      GROQ_MODEL: "${GROQ_MODEL:-llama-3.1-8b-instant}"
+
+      SMTP_HOST: "${SMTP_HOST}"
+      SMTP_PORT: "${SMTP_PORT:-587}"
+      SMTP_USER: "${SMTP_USER}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD}"
+      SMTP_FROM: "${SMTP_FROM:-ai-observability@local}"
+      SMTP_TO: "${SMTP_TO}"
+      SMTP_USE_TLS: "${SMTP_USE_TLS:-true}"
+    ports:
+    - "8000:8000"
+    networks:
+    - ai-incident-network
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: any
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+        reservations:
+          cpus: "0.10"
+          memory: 128M
+
+networks:
+  ai-incident-network:
