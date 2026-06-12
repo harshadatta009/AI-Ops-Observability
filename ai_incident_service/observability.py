@@ -2,11 +2,39 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
+from .logging_config import get_logger
 from .models import AlertContext
 
 
+logger = get_logger("observability")
+
 SERVICE_LABEL = "container_label_com_docker_swarm_service_name"
+
+
+def build_retrying_session(max_retries: int) -> requests.Session:
+    """A requests Session that retries transient failures with backoff.
+
+    Retries connection errors and 429/5xx responses for idempotent GETs, with
+    exponential backoff. This makes a brief Prometheus/Loki blip a non-event
+    instead of turning into "no data" (and therefore a misleading report).
+    """
+    session = requests.Session()
+    retry = Retry(
+        total=max_retries,
+        connect=max_retries,
+        read=max_retries,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET"]),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
 DB_SERVICE_REGEX = ".*(postgres|influx|redis|trino|minio|mysql|mongo|db).*"
 ERROR_LOG_PATTERN = (
     "(?i)error|exception|failed|timeout|oom|killed|critical|panic|refused|"
@@ -15,20 +43,59 @@ ERROR_LOG_PATTERN = (
 
 
 class PrometheusClient:
-    def __init__(self, base_url: str, timeout_seconds: int = 15) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout_seconds: int = 15,
+        max_retries: int = 3,
+        session: requests.Session = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
-        self.timeout_seconds = timeout_seconds
+        # (connect, read) timeout — fail fast on a dead host, allow slower reads.
+        self.timeout = (min(5, timeout_seconds), timeout_seconds)
+        self.session = session or build_retrying_session(max_retries)
 
     def query(self, query: str) -> Any:
         try:
-            response = requests.get(
+            response = self.session.get(
                 f"{self.base_url}/api/v1/query",
                 params={"query": query},
-                timeout=self.timeout_seconds,
+                timeout=self.timeout,
             )
             response.raise_for_status()
             return response.json().get("data", {}).get("result", [])
         except Exception as exc:
+            logger.warning("Prometheus query failed: %s", exc)
+            return {"error": str(exc), "query": query}
+
+    def query_range(
+        self,
+        query: str,
+        start: datetime,
+        end: datetime,
+        step_seconds: int,
+    ) -> Any:
+        """Return a Prometheus range vector for ``query`` over [start, end].
+
+        On success returns the ``result`` list (one entry per series, each with a
+        ``values`` array of ``[unix_ts, value]`` pairs). On failure returns a dict
+        with an ``error`` key so callers can record the gap instead of crashing.
+        """
+        try:
+            response = self.session.get(
+                f"{self.base_url}/api/v1/query_range",
+                params={
+                    "query": query,
+                    "start": start.timestamp(),
+                    "end": end.timestamp(),
+                    "step": f"{step_seconds}s",
+                },
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            return response.json().get("data", {}).get("result", [])
+        except Exception as exc:
+            logger.warning("Prometheus range query failed: %s", exc)
             return {"error": str(exc), "query": query}
 
 
@@ -39,18 +106,21 @@ class LokiClient:
         max_log_lines: int,
         max_log_chars: int,
         timeout_seconds: int = 20,
+        max_retries: int = 3,
+        session: requests.Session = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.max_log_lines = max_log_lines
         self.max_log_chars = max_log_chars
-        self.timeout_seconds = timeout_seconds
+        self.timeout = (min(5, timeout_seconds), timeout_seconds)
+        self.session = session or build_retrying_session(max_retries)
 
     def query_range(self, logql: str, lookback_minutes: int) -> Dict[str, Any]:
         end_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
         start_ns = end_ns - lookback_minutes * 60 * 1_000_000_000
 
         try:
-            response = requests.get(
+            response = self.session.get(
                 f"{self.base_url}/loki/api/v1/query_range",
                 params={
                     "query": logql,
@@ -59,7 +129,7 @@ class LokiClient:
                     "limit": self.max_log_lines,
                     "direction": "backward",
                 },
-                timeout=self.timeout_seconds,
+                timeout=self.timeout,
             )
             response.raise_for_status()
             streams = response.json().get("data", {}).get("result", [])
@@ -74,6 +144,7 @@ class LokiClient:
                 "logs": "\n".join(lines[: self.max_log_lines])[: self.max_log_chars],
             }
         except Exception as exc:
+            logger.warning("Loki query failed: %s", exc)
             return {"error": str(exc), "query": logql, "logs": ""}
 
 

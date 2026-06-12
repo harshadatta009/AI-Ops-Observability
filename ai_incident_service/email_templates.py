@@ -7,14 +7,20 @@ from .models import AlertContext
 
 SECTION_TITLES = [
     "Incident Summary",
-    "Probable Root Cause",
-    "Evidence from Metrics",
-    "Evidence from Logs",
-    "Impact",
-    "Recommended Actions",
-    "Severity",
-    "Threshold Recommendation",
-    "Additional Notes",
+    "Affected Services",
+    "Timeline of Events",
+    "Metrics Analyzed",
+    "Evidence Supporting the Conclusion",
+    "Confirmed Issues",
+    "Probable Causes",
+    "Possible Contributing Factors",
+    "False Positives / Weak Signals",
+    "Root Cause Hypothesis",
+    "Confidence Score",
+    "False-Positive Checks Performed",
+    "Prometheus Queries & Time Ranges Used",
+    "Recommended Remediation Steps",
+    "Additional Data Needed",
 ]
 
 
